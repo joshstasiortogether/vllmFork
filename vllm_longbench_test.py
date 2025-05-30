@@ -45,20 +45,39 @@ def get_pred_vllm(llm, tokenizer, data, max_length, max_gen, prompt_format, data
     prompts = []
     json_objs = []
     
+    # Reserve buffer for chat formatting and safety margin
+    chat_buffer = 200  # Conservative buffer for chat formatting
+    effective_max_length = max_length - max_gen - chat_buffer
+    
     # Prepare all prompts
     for json_obj in data:
         prompt = prompt_format.format(**json_obj)
-        # Truncate to fit max_length (middle truncation like KIVI)
-        tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
         
-        if len(tokenized_prompt) > max_length:
-            half = int(max_length/2)
-            prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + \
-                    tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        
-        # Apply chat formatting for certain tasks (same logic as KIVI)
+        # Apply chat formatting for certain tasks BEFORE truncation to get accurate length
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
             prompt = build_chat(tokenizer, prompt, model_name)
+        
+        # Truncate to fit effective max_length (middle truncation like KIVI)
+        tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
+        
+        if len(tokenized_prompt) > effective_max_length:
+            half = int(effective_max_length/2)
+            prompt_start = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)
+            prompt_end = tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
+            prompt = prompt_start + prompt_end
+            
+            # Re-apply chat formatting if needed (for consistency)
+            if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
+                prompt = build_chat(tokenizer, prompt, model_name)
+        
+        # Final safety check - ensure we don't exceed max_length - max_gen
+        final_tokens = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
+        if len(final_tokens) > max_length - max_gen:
+            # Aggressive truncation as last resort
+            safe_length = max_length - max_gen - 50  # Extra safety margin
+            truncated_tokens = final_tokens[:safe_length]
+            prompt = tokenizer.decode(truncated_tokens, skip_special_tokens=True)
+            print(f"Warning: Aggressively truncated prompt for {dataset} to {len(truncated_tokens)} tokens")
         
         prompts.append(prompt)
         json_objs.append(json_obj)
